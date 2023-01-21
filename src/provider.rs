@@ -10,9 +10,16 @@ use pin_project_lite::pin_project;
 
 use crate::waker::ProviderWaker;
 
-pub trait ProviderFutExt: Sized {
+/// Extension trait that aims to simplify the providing of values
+/// in the async context.
+pub trait ProviderFutExt: Future + Sized {
     /// Wraps a [`Future`] so it can provide values into the async context.
-    fn provide<P: Provider>(self, provider: P) -> ProviderFut<Self, P>;
+    fn provide<P: Provider>(self, provider: P) -> ProviderFut<Self, P> {
+        ProviderFut {
+            inner: self,
+            provider,
+        }
+    }
 
     /// Wraps a [`Future`] so it can provide this value into the async context.
     ///
@@ -29,24 +36,11 @@ pub trait ProviderFutExt: Sized {
     }
 }
 
-impl<F: Future> ProviderFutExt for F {
-    fn provide<P>(self, provider: P) -> ProviderFut<Self, P> {
-        ProviderFut {
-            inner: self,
-            provider,
-        }
-    }
-}
+impl<F: Future> ProviderFutExt for F {}
 
-pin_project!(
-    pub struct ProviderFut<F, T> {
-        #[pin]
-        inner: F,
-        provider: T,
-    }
-);
-
+/// [`Provider`] used by [`provide_ref`](ProviderFutExt::provide_ref).
 pub struct ProvideRef<'a, T: ?Sized>(&'a T);
+/// [`Provider`] used by [`provide_value`](ProviderFutExt::provide_value).
 pub struct ProvideValue<T>(Cell<Option<T>>);
 
 impl<T: 'static + ?Sized> Provider for ProvideRef<'_, T> {
@@ -66,6 +60,15 @@ impl<T: 'static> Provider for ProvideValue<T> {
         }
     }
 }
+
+pin_project!(
+    /// [`Future`] returned by methods on [`ProviderFutExt`].
+    pub struct ProviderFut<F, T> {
+        #[pin]
+        inner: F,
+        provider: T,
+    }
+);
 
 impl<F: Future, P: Provider> Future for ProviderFut<F, P> {
     type Output = F::Output;

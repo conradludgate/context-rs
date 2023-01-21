@@ -6,7 +6,7 @@ mod provider;
 mod waker;
 
 pub use demand::{get_value, take_value, with_ref};
-pub use provider::ProviderFutExt;
+pub use provider::{ProvideRef, ProvideValue, ProviderFut, ProviderFutExt};
 pub use waker::ProviderWaker;
 
 #[cfg(test)]
@@ -16,37 +16,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {
-        let test = async {
-            (
-                get_value::<usize>().await.unwrap(),
-                get_value::<usize>().await.unwrap(),
-                take_value::<String>().await.unwrap(),
-                take_value::<String>().await.unwrap(),
-                take_value::<Vec<u8>>().await.unwrap(),
-                take_value::<Vec<u8>>().await,
-            )
-        };
+    fn ctx_with_ref() {
+        let val = async {
+            // works once
+            let upper = with_ref(|s: &str| s.to_uppercase()).await.unwrap();
+            // works again
+            let len = with_ref(|s: &str| s.len()).await.unwrap();
+            format!("{upper}{len}")
+        }
+        .provide_ref("foo")
+        .now_or_never()
+        .unwrap();
 
-        let (v0, v1, v2, v3, v4, v5) = test
-            .provide_value(vec![1_u8, 2, 3, 4])
-            .provide_value("hello world".to_owned())
-            .provide_value("goodbye world".to_owned())
-            .provide_ref(&123_usize)
-            .now_or_never()
-            .unwrap();
+        assert_eq!(val, "FOO3");
+    }
 
-        // get_value should not remove from context and should be
-        // callable again
-        assert_eq!(v0, 123);
-        assert_eq!(v1, 123);
+    #[test]
+    fn ctx_get_value() {
+        let val = async {
+            // works once
+            let num1 = get_value::<i32>().await.unwrap();
+            // works again
+            let num2 = get_value::<i32>().await.unwrap();
+            num1 + num2
+        }
+        .provide_ref(&123)
+        .now_or_never()
+        .unwrap();
 
-        // take_value should also work, returning the chain of owned values
-        assert_eq!(v2, "hello world");
-        assert_eq!(v3, "goodbye world");
+        assert_eq!(val, 246);
+    }
 
-        // take_value should return the None if there's no more values in the chain
-        assert_eq!(v4, [1, 2, 3, 4]);
-        assert_eq!(v5, None);
+    #[test]
+    fn ctx_take_value() {
+        let val = async {
+            // works once
+            let greeting: &'static str = take_value().await.unwrap();
+            // works again
+            let subject: &'static str = take_value().await.unwrap();
+
+            // third time has no value
+            assert_eq!(take_value::<&'static str>().await, None);
+
+            format!("{greeting}, {subject}!")
+        }
+        .provide_value("Hello")
+        .provide_value("World")
+        .now_or_never()
+        .unwrap();
+
+        assert_eq!(val, "Hello, World!");
     }
 }

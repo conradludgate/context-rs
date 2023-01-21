@@ -7,7 +7,7 @@ use core::{
 
 use crate::waker::ProviderWaker;
 
-fn request_ref_from_context<'c, T: 'static>(cx: &Context<'c>) -> Option<&'c T> {
+fn request_ref_from_context<'c, T: 'static + ?Sized>(cx: &Context<'c>) -> Option<&'c T> {
     ProviderWaker::from_waker_ref(cx.waker()).and_then(|cx| core::any::request_ref(cx))
 }
 
@@ -53,18 +53,21 @@ impl<T: 'static> Future for TakeValueFut<T> {
 
 /// Get a value from the current context. Only works when paired with
 /// [`provide_ref`](crate::ProviderFutExt::provide_ref)
-pub fn with_ref<T: 'static, F: for<'c> FnOnce(&'c T) -> R, R>(
+pub fn with_ref<T: 'static + ?Sized, F: for<'c> FnOnce(&'c T) -> R, R>(
     f: F,
 ) -> impl Future<Output = Option<R>> {
-    WithRefFut(Some(f), core::marker::PhantomData::<(T, R)>)
+    WithRefFut(Some(f), core::marker::PhantomData::<(&'static T, R)>)
 }
 
 /// [`Future`] returned by [`with_ref`]
-struct WithRefFut<T, F: for<'c> FnOnce(&'c T) -> R, R>(Option<F>, PhantomData<(T, R)>);
+struct WithRefFut<T: 'static + ?Sized, F: for<'c> FnOnce(&'c T) -> R, R>(
+    Option<F>,
+    PhantomData<(&'static T, R)>,
+);
 
-impl<T, F: for<'c> FnOnce(&'c T) -> R, R> Unpin for WithRefFut<T, F, R> {}
+impl<T: 'static + ?Sized, F: for<'c> FnOnce(&'c T) -> R, R> Unpin for WithRefFut<T, F, R> {}
 
-impl<T: 'static, F: for<'c> FnOnce(&'c T) -> R, R> Future for WithRefFut<T, F, R> {
+impl<T: 'static + ?Sized, F: for<'c> FnOnce(&'c T) -> R, R> Future for WithRefFut<T, F, R> {
     type Output = Option<R>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
