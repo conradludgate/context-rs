@@ -1,6 +1,7 @@
 #![feature(waker_getters, provide_any)]
+#![cfg_attr(not(test), no_std)]
 
-use std::{
+use core::{
     any::Provider,
     cell::Cell,
     future::Future,
@@ -20,7 +21,7 @@ static VTABLE: RawWakerVTable = {
         let inner = (*waker.cast::<ContextWaker>()).ctx.clone();
         // SAFETY: technically not because Waker isn't guaranteed to be transparent
         // but this is the best I can do for now.
-        std::mem::transmute(inner)
+        core::mem::transmute(inner)
     }
     unsafe fn wake(waker: *const ()) {
         (*waker.cast::<ContextWaker>()).ctx.wake_by_ref()
@@ -52,7 +53,7 @@ impl<'a, 'b> ContextWaker<'a, 'b> {
 }
 
 impl Provider for ContextWaker<'_, '_> {
-    fn provide<'a>(&'a self, demand: &mut std::any::Demand<'a>) {
+    fn provide<'a>(&'a self, demand: &mut core::any::Demand<'a>) {
         self.value.provide(demand);
         if let Some(cx) = Self::from_waker(self.ctx) {
             cx.provide(demand)
@@ -61,19 +62,19 @@ impl Provider for ContextWaker<'_, '_> {
 }
 
 pub trait WithContextExt: Sized {
-    fn with_value<T>(self, value: T) -> ContextWrapper<Self, T>;
-    fn with_ref<T: ?Sized>(self, value: &T) -> ContextWrapperRef<'_, Self, T>;
+    fn with_value<T>(self, value: T) -> ContextWrapper<Self, ProvideOwned<T>>;
+    fn with_ref<T: ?Sized>(self, value: &T) -> ContextWrapper<Self, ProvideRef<'_, T>>;
 }
 
 impl<F: Future> WithContextExt for F {
-    fn with_value<T>(self, value: T) -> ContextWrapper<Self, T> {
+    fn with_value<T>(self, value: T) -> ContextWrapper<Self, ProvideOwned<T>> {
         ContextWrapper {
             inner: self,
             value: ProvideOwned(Cell::new(Some(value))),
         }
     }
-    fn with_ref<T: ?Sized>(self, value: &T) -> ContextWrapperRef<'_, Self, T> {
-        ContextWrapperRef {
+    fn with_ref<T: ?Sized>(self, value: &T) -> ContextWrapper<Self, ProvideRef<'_, T>> {
+        ContextWrapper {
             inner: self,
             value: ProvideRef(value),
         }
@@ -81,33 +82,27 @@ impl<F: Future> WithContextExt for F {
 }
 
 pin_project!(
-    pub struct ContextWrapperRef<'a, F, T: ?Sized> {
-        #[pin]
-        inner: F,
-        value: ProvideRef<'a, T>,
-    }
-);
-
-pin_project!(
     pub struct ContextWrapper<F, T> {
         #[pin]
         inner: F,
-        value: ProvideOwned<T>,
+        value: T,
     }
 );
 
-struct ProvideRef<'a, T: ?Sized>(&'a T);
-struct ProvideOwned<T>(Cell<Option<T>>);
+#[doc(hidden)]
+pub struct ProvideRef<'a, T: ?Sized>(&'a T);
+#[doc(hidden)]
+pub struct ProvideOwned<T>(Cell<Option<T>>);
 
 impl<T: 'static + ?Sized> Provider for ProvideRef<'_, T> {
-    fn provide<'a>(&'a self, demand: &mut std::any::Demand<'a>) {
+    fn provide<'a>(&'a self, demand: &mut core::any::Demand<'a>) {
         if demand.would_be_satisfied_by_ref_of::<T>() {
             demand.provide_ref(self.0);
         }
     }
 }
 impl<T: 'static> Provider for ProvideOwned<T> {
-    fn provide<'a>(&'a self, demand: &mut std::any::Demand<'a>) {
+    fn provide<'a>(&'a self, demand: &mut core::any::Demand<'a>) {
         if demand.would_be_satisfied_by_value_of::<T>() {
             if let Some(x) = self.0.take() {
                 demand.provide_value(x);
@@ -116,7 +111,7 @@ impl<T: 'static> Provider for ProvideOwned<T> {
     }
 }
 
-impl<F: Future, T: 'static> Future for ContextWrapper<F, T> {
+impl<F: Future, P: Provider> Future for ContextWrapper<F, P> {
     type Output = F::Output;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -133,52 +128,39 @@ impl<F: Future, T: 'static> Future for ContextWrapper<F, T> {
     }
 }
 
-impl<F: Future, T: 'static + ?Sized> Future for ContextWrapperRef<'_, F, T> {
-    type Output = F::Output;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-
-        ContextWaker {
-            ctx: cx.waker(),
-            value: this.value,
-        }
-        .as_waker(|waker| {
-            let mut cx = Context::from_waker(waker);
-            this.inner.poll(&mut cx)
-        })
-    }
-}
-
-/// Get a value from the current context
+/// Clone out a value from the current context
 pub fn get_value<T: 'static + Clone>() -> impl Future<Output = Option<T>> {
-    GetValueFut(std::marker::PhantomData::<T>)
+    GetValueFut(core::marker::PhantomData::<T>)
 }
 
-struct GetValueFut<T>(std::marker::PhantomData<T>);
+struct GetValueFut<T>(core::marker::PhantomData<T>);
 
 impl<T: Clone + 'static> Future for GetValueFut<T> {
     type Output = Option<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Poll::Ready(
-            ContextWaker::from_waker(cx.waker()).and_then(|cx| std::any::request_ref(cx).cloned()),
+            ContextWaker::from_waker(cx.waker())
+                .and_then(|cx| core::any::request_ref(cx))
+                .cloned(),
         )
     }
 }
 
 /// Take a value from the current context
 pub fn take_value<T: 'static>() -> impl Future<Output = Option<T>> {
-    TakeValueFut(std::marker::PhantomData::<T>)
+    TakeValueFut(core::marker::PhantomData::<T>)
 }
 
-struct TakeValueFut<T>(std::marker::PhantomData<T>);
+struct TakeValueFut<T>(core::marker::PhantomData<T>);
 
 impl<T: 'static> Future for TakeValueFut<T> {
     type Output = Option<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Poll::Ready(ContextWaker::from_waker(cx.waker()).and_then(|cx| std::any::request_value(cx)))
+        Poll::Ready(
+            ContextWaker::from_waker(cx.waker()).and_then(|cx| core::any::request_value(cx)),
+        )
     }
 }
 
@@ -190,27 +172,36 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let block = async {
-            async {
-                async {
-                    (
-                        get_value::<usize>().await.unwrap(),
-                        take_value::<String>().await.unwrap(),
-                        take_value::<Vec<u8>>().await.unwrap(),
-                    )
-                }
-                .with_value(vec![1_u8, 2, 3, 4])
-                .await
-            }
+        let test = async {
+            (
+                get_value::<usize>().await.unwrap(),
+                get_value::<usize>().await.unwrap(),
+                take_value::<String>().await.unwrap(),
+                take_value::<String>().await.unwrap(),
+                take_value::<Vec<u8>>().await.unwrap(),
+                take_value::<Vec<u8>>().await,
+            )
+        };
+
+        let (v0, v1, v2, v3, v4, v5) = test
+            .with_value(vec![1_u8, 2, 3, 4])
             .with_value("hello world".to_owned())
-            .await
-        }
-        .with_ref(&123_usize);
+            .with_value("goodbye world".to_owned())
+            .with_ref(&123_usize)
+            .now_or_never()
+            .unwrap();
 
-        let (v1, v2, v3) = block.now_or_never().unwrap();
-
+        // get_value should not remove from context and should be
+        // callable again
+        assert_eq!(v0, 123);
         assert_eq!(v1, 123);
+
+        // take_value should also work, returning the chain of owned values
         assert_eq!(v2, "hello world");
-        assert_eq!(v3, [1, 2, 3, 4]);
+        assert_eq!(v3, "goodbye world");
+
+        // take_value should return the None if there's no more values in the chain
+        assert_eq!(v4, [1, 2, 3, 4]);
+        assert_eq!(v5, None);
     }
 }
