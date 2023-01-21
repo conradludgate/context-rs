@@ -45,6 +45,15 @@ impl<'a, 'b> ContextWaker<'a, 'b> {
 
         f(&waker)
     }
+
+    fn from_waker(waker: &Waker) -> Option<&Self> {
+        if waker.as_raw().vtable() == &VTABLE {
+            // SAFETY: dunno yet, maybe
+            Some(unsafe { &*waker.as_raw().data().cast::<Self>() })
+        } else {
+            None
+        }
+    }
 }
 
 pub trait WithContextExt: Sized {
@@ -80,21 +89,15 @@ impl<F: Future, T: TypeMapKey> Future for ContextWrapper<F, T> {
             ctx: cx.waker(),
             map: this.map,
         };
-        let mut cx2 = &cx2;
 
         // use the existing context, if possible
-        if cx.waker().as_raw().vtable() == &VTABLE {
-            // SAFETY: dunno yet, maybe
-            cx2 = unsafe { &*cx.waker().as_raw().data().cast::<ContextWaker>() };
-        };
+        let cx2 = ContextWaker::from_waker(cx.waker()).unwrap_or(&cx2);
 
         // insert the value into the current context
-        let old = {
-            let map = &mut *cx2.map.borrow_mut();
-            let old = map.remove::<T>();
-            map.insert::<T>(this.value.take().unwrap());
-            old
-        };
+        let mut guard = cx2.map.borrow_mut();
+        let old = guard.remove::<T>();
+        guard.insert::<T>(this.value.take().unwrap());
+        drop(guard);
 
         // poll the future
         let res = cx2.as_waker(|waker| {
@@ -103,13 +106,11 @@ impl<F: Future, T: TypeMapKey> Future for ContextWrapper<F, T> {
         });
 
         // remove the current value and replace it with the old value
-        {
-            let map = &mut *cx2.map.borrow_mut();
-            *this.value = map.remove::<T>();
-            if let Some(old) = old {
-                map.insert::<T>(old);
-            }
-        };
+        let mut guard = cx2.map.borrow_mut();
+        *this.value = guard.remove::<T>();
+        if let Some(old) = old {
+            guard.insert::<T>(old);
+        }
 
         res
     }
@@ -132,14 +133,9 @@ where
     type Output = Option<T::Value>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // use the existing context, if possible
-        if cx.waker().as_raw().vtable() == &VTABLE {
-            // SAFETY: dunno yet, maybe
-            let cx = unsafe { &*cx.waker().as_raw().data().cast::<ContextWaker>() };
-            Poll::Ready(cx.map.borrow().get::<T>().cloned())
-        } else {
-            Poll::Ready(None)
-        }
+        Poll::Ready(
+            ContextWaker::from_waker(cx.waker()).and_then(|cx| cx.map.borrow().get::<T>().cloned()),
+        )
     }
 }
 
@@ -154,14 +150,9 @@ impl<T: TypeMapKey> Future for TakeValueFut<T> {
     type Output = Option<T::Value>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // use the existing context, if possible
-        if cx.waker().as_raw().vtable() == &VTABLE {
-            // SAFETY: dunno yet, maybe
-            let cx = unsafe { &*cx.waker().as_raw().data().cast::<ContextWaker>() };
-            Poll::Ready(cx.map.borrow_mut().remove::<T>())
-        } else {
-            Poll::Ready(None)
-        }
+        Poll::Ready(
+            ContextWaker::from_waker(cx.waker()).and_then(|cx| cx.map.borrow_mut().remove::<T>()),
+        )
     }
 }
 
@@ -170,7 +161,6 @@ mod tests {
     use futures_util::FutureExt;
 
     use super::*;
-
 
     struct Key1;
     struct Key2;
@@ -198,9 +188,14 @@ mod tests {
                         get_value::<Key2>().await.unwrap(),
                         get_value::<Key3>().await.unwrap(),
                     )
-                }.with_value::<Key3>(vec![1, 2, 3, 4]).await
-            }.with_value::<Key2>("hello world".to_owned()).await
-        }.with_value::<Key1>(123);
+                }
+                .with_value::<Key3>(vec![1, 2, 3, 4])
+                .await
+            }
+            .with_value::<Key2>("hello world".to_owned())
+            .await
+        }
+        .with_value::<Key1>(123);
 
         let (v1, v2, v3) = block.now_or_never().unwrap();
 
