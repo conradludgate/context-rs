@@ -1,19 +1,18 @@
-#![feature(waker_getters)]
+#![feature(waker_getters, provide_any)]
 
 use std::{
-    cell::RefCell,
+    any::Provider,
+    cell::Cell,
     future::Future,
-    mem::ManuallyDrop,
     pin::Pin,
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
 use pin_project_lite::pin_project;
-use typemap_rev::{TypeMap, TypeMapKey};
 
 struct ContextWaker<'a, 'b> {
     ctx: &'a Waker,
-    map: &'b RefCell<TypeMap>,
+    value: &'b dyn Provider,
 }
 
 static VTABLE: RawWakerVTable = {
@@ -36,12 +35,8 @@ static VTABLE: RawWakerVTable = {
 
 impl<'a, 'b> ContextWaker<'a, 'b> {
     fn as_waker<R>(&self, f: impl for<'w> FnOnce(&'w Waker) -> R) -> R {
-        let waker = unsafe {
-            ManuallyDrop::new(Waker::from_raw(RawWaker::new(
-                (self as *const Self).cast(),
-                &VTABLE,
-            )))
-        };
+        let waker =
+            unsafe { Waker::from_raw(RawWaker::new((self as *const Self).cast(), &VTABLE)) };
 
         f(&waker)
     }
@@ -56,103 +51,134 @@ impl<'a, 'b> ContextWaker<'a, 'b> {
     }
 }
 
+impl Provider for ContextWaker<'_, '_> {
+    fn provide<'a>(&'a self, demand: &mut std::any::Demand<'a>) {
+        self.value.provide(demand);
+        if let Some(cx) = Self::from_waker(self.ctx) {
+            cx.provide(demand)
+        }
+    }
+}
+
 pub trait WithContextExt: Sized {
-    fn with_value<T: TypeMapKey>(self, value: T::Value) -> ContextWrapper<Self, T>;
+    fn with_value<T>(self, value: T) -> ContextWrapper<Self, T>;
+    fn with_ref<T: ?Sized>(self, value: &T) -> ContextWrapperRef<'_, Self, T>;
 }
 
 impl<F: Future> WithContextExt for F {
-    fn with_value<T: TypeMapKey>(self, value: T::Value) -> ContextWrapper<Self, T> {
+    fn with_value<T>(self, value: T) -> ContextWrapper<Self, T> {
         ContextWrapper {
             inner: self,
-            map: RefCell::new(TypeMap::new()),
-            value: Some(value),
+            value: ProvideOwned(Cell::new(Some(value))),
+        }
+    }
+    fn with_ref<T: ?Sized>(self, value: &T) -> ContextWrapperRef<'_, Self, T> {
+        ContextWrapperRef {
+            inner: self,
+            value: ProvideRef(value),
         }
     }
 }
 
 pin_project!(
-    pub struct ContextWrapper<F, T: TypeMapKey> {
+    pub struct ContextWrapperRef<'a, F, T: ?Sized> {
         #[pin]
         inner: F,
-        map: RefCell<TypeMap>,
-        value: Option<T::Value>,
+        value: ProvideRef<'a, T>,
     }
 );
 
-impl<F: Future, T: TypeMapKey> Future for ContextWrapper<F, T> {
+pin_project!(
+    pub struct ContextWrapper<F, T> {
+        #[pin]
+        inner: F,
+        value: ProvideOwned<T>,
+    }
+);
+
+struct ProvideRef<'a, T: ?Sized>(&'a T);
+struct ProvideOwned<T>(Cell<Option<T>>);
+
+impl<T: 'static + ?Sized> Provider for ProvideRef<'_, T> {
+    fn provide<'a>(&'a self, demand: &mut std::any::Demand<'a>) {
+        if demand.would_be_satisfied_by_ref_of::<T>() {
+            demand.provide_ref(self.0);
+        }
+    }
+}
+impl<T: 'static> Provider for ProvideOwned<T> {
+    fn provide<'a>(&'a self, demand: &mut std::any::Demand<'a>) {
+        if demand.would_be_satisfied_by_value_of::<T>() {
+            if let Some(x) = self.0.take() {
+                demand.provide_value(x);
+            }
+        }
+    }
+}
+
+impl<F: Future, T: 'static> Future for ContextWrapper<F, T> {
     type Output = F::Output;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
 
-        let cx2 = ContextWaker {
+        ContextWaker {
             ctx: cx.waker(),
-            map: this.map,
-        };
-
-        // use the existing context, if possible
-        let cx2 = ContextWaker::from_waker(cx.waker()).unwrap_or(&cx2);
-
-        // insert the value into the current context
-        let mut guard = cx2.map.borrow_mut();
-        let old = guard.remove::<T>();
-        guard.insert::<T>(this.value.take().unwrap());
-        drop(guard);
-
-        // poll the future
-        let res = cx2.as_waker(|waker| {
+            value: this.value,
+        }
+        .as_waker(|waker| {
             let mut cx = Context::from_waker(waker);
             this.inner.poll(&mut cx)
-        });
+        })
+    }
+}
 
-        // remove the current value and replace it with the old value
-        let mut guard = cx2.map.borrow_mut();
-        *this.value = guard.remove::<T>();
-        if let Some(old) = old {
-            guard.insert::<T>(old);
+impl<F: Future, T: 'static + ?Sized> Future for ContextWrapperRef<'_, F, T> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();
+
+        ContextWaker {
+            ctx: cx.waker(),
+            value: this.value,
         }
-
-        res
+        .as_waker(|waker| {
+            let mut cx = Context::from_waker(waker);
+            this.inner.poll(&mut cx)
+        })
     }
 }
 
 /// Get a value from the current context
-pub fn get_value<T: TypeMapKey>() -> impl Future<Output = Option<T::Value>>
-where
-    T::Value: Clone,
-{
+pub fn get_value<T: 'static + Clone>() -> impl Future<Output = Option<T>> {
     GetValueFut(std::marker::PhantomData::<T>)
 }
 
 struct GetValueFut<T>(std::marker::PhantomData<T>);
 
-impl<T: TypeMapKey> Future for GetValueFut<T>
-where
-    T::Value: Clone,
-{
-    type Output = Option<T::Value>;
+impl<T: Clone + 'static> Future for GetValueFut<T> {
+    type Output = Option<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Poll::Ready(
-            ContextWaker::from_waker(cx.waker()).and_then(|cx| cx.map.borrow().get::<T>().cloned()),
+            ContextWaker::from_waker(cx.waker()).and_then(|cx| std::any::request_ref(cx).cloned()),
         )
     }
 }
 
 /// Take a value from the current context
-pub fn take_value<T: TypeMapKey>() -> impl Future<Output = Option<T::Value>> {
+pub fn take_value<T: 'static>() -> impl Future<Output = Option<T>> {
     TakeValueFut(std::marker::PhantomData::<T>)
 }
 
 struct TakeValueFut<T>(std::marker::PhantomData<T>);
 
-impl<T: TypeMapKey> Future for TakeValueFut<T> {
-    type Output = Option<T::Value>;
+impl<T: 'static> Future for TakeValueFut<T> {
+    type Output = Option<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Poll::Ready(
-            ContextWaker::from_waker(cx.waker()).and_then(|cx| cx.map.borrow_mut().remove::<T>()),
-        )
+        Poll::Ready(ContextWaker::from_waker(cx.waker()).and_then(|cx| std::any::request_value(cx)))
     }
 }
 
@@ -162,40 +188,24 @@ mod tests {
 
     use super::*;
 
-    struct Key1;
-    struct Key2;
-    struct Key3;
-
-    impl TypeMapKey for Key1 {
-        type Value = usize;
-    }
-
-    impl TypeMapKey for Key2 {
-        type Value = String;
-    }
-
-    impl TypeMapKey for Key3 {
-        type Value = Vec<u8>;
-    }
-
     #[test]
     fn it_works() {
         let block = async {
             async {
                 async {
                     (
-                        get_value::<Key1>().await.unwrap(),
-                        get_value::<Key2>().await.unwrap(),
-                        get_value::<Key3>().await.unwrap(),
+                        get_value::<usize>().await.unwrap(),
+                        take_value::<String>().await.unwrap(),
+                        take_value::<Vec<u8>>().await.unwrap(),
                     )
                 }
-                .with_value::<Key3>(vec![1, 2, 3, 4])
+                .with_value(vec![1_u8, 2, 3, 4])
                 .await
             }
-            .with_value::<Key2>("hello world".to_owned())
+            .with_value("hello world".to_owned())
             .await
         }
-        .with_value::<Key1>(123);
+        .with_ref(&123_usize);
 
         let (v1, v2, v3) = block.now_or_never().unwrap();
 
