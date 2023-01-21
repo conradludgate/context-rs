@@ -1,5 +1,6 @@
 #![feature(waker_getters, provide_any)]
 #![cfg_attr(not(test), no_std)]
+#![doc = include_str!("../README.md")]
 
 mod demand;
 mod provider;
