@@ -1,6 +1,6 @@
 [package]
 name = "context-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Conrad Ludgate <conradludgate@gmail.com>"]
 description = "Pass values down the async call stack, with no_std and no_alloc support"
@@ -14,3 +14,4 @@ pin-project-lite = "0.2.9"
 
 [dev-dependencies]
 futures-util = "0.3.25"
+tokio = { version = "1", features = ["full"] }

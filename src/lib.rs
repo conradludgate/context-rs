@@ -6,12 +6,17 @@ mod demand;
 mod provider;
 mod waker;
 
-pub use demand::{get_value, take_value, with_ref};
-pub use provider::{ProvideRef, ProvideValue, ProviderFut, ProviderFutExt};
+pub use demand::{get_value, with_ref};
+pub use provider::{ProvideRef, ProviderFut, ProviderFutExt};
 pub use waker::ProviderWaker;
 
 #[cfg(test)]
 mod tests {
+    use core::{
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll},
+    };
     use futures_util::FutureExt;
 
     use super::*;
@@ -48,24 +53,59 @@ mod tests {
         assert_eq!(val, 246);
     }
 
-    #[test]
-    fn ctx_take_value() {
-        let val = async {
-            // works once
-            let greeting: &'static str = take_value().await.unwrap();
-            // works again
-            let subject: &'static str = take_value().await.unwrap();
-
-            // third time has no value
-            assert_eq!(take_value::<&'static str>().await, None);
-
-            format!("{greeting}, {subject}!")
+    #[tokio::test]
+    async fn waker_works() {
+        async {
+            yield_now().await;
+            yield_clone_now().await;
         }
-        .provide_value("Hello")
-        .provide_value("World")
-        .now_or_never()
-        .unwrap();
+        .provide_ref(&())
+        .await;
+    }
 
-        assert_eq!(val, "Hello, World!");
+    pub async fn yield_now() {
+        /// Yield implementation
+        struct YieldNow {
+            yielded: bool,
+        }
+
+        impl Future for YieldNow {
+            type Output = ();
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+                if self.yielded {
+                    return Poll::Ready(());
+                }
+                self.yielded = true;
+                cx.waker().wake_by_ref();
+
+                Poll::Pending
+            }
+        }
+
+        YieldNow { yielded: false }.await
+    }
+
+    pub async fn yield_clone_now() {
+        /// Yield implementation
+        struct YieldNow {
+            yielded: bool,
+        }
+
+        impl Future for YieldNow {
+            type Output = ();
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+                if self.yielded {
+                    return Poll::Ready(());
+                }
+                self.yielded = true;
+                cx.waker().clone().wake();
+
+                Poll::Pending
+            }
+        }
+
+        YieldNow { yielded: false }.await
     }
 }

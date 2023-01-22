@@ -25,11 +25,12 @@ static VTABLE: RawWakerVTable = {
         // but this is the best I can do for now.
         core::mem::transmute(inner)
     }
-    unsafe fn wake(waker: *const ()) {
-        (*waker.cast::<ProviderWaker>()).waker.wake_by_ref()
-    }
     unsafe fn wake_by_ref(waker: *const ()) {
         (*waker.cast::<ProviderWaker>()).waker.wake_by_ref()
+    }
+    unsafe fn wake(_: *const ()) {
+        // should never get ownership of ProviderWaker's Waker
+        // (*waker.cast::<ProviderWaker>()).waker.wake_by_ref()
     }
     unsafe fn drop(_: *const ()) { /* ProviderWaker needs no drop */
     }

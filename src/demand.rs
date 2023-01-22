@@ -11,52 +11,16 @@ fn request_ref_from_context<'c, T: 'static + ?Sized>(cx: &Context<'c>) -> Option
     ProviderWaker::from_waker_ref(cx.waker()).and_then(|cx| core::any::request_ref(cx))
 }
 
-fn request_value_from_context<T: 'static>(cx: &Context<'_>) -> Option<T> {
-    ProviderWaker::from_waker_ref(cx.waker()).and_then(|cx| core::any::request_value(cx))
+/// Get a value from the current context. Only works when paired with
+/// [`provide_ref`](crate::ProviderFutExt::provide_ref)
+pub async fn get_value<T: 'static + Clone>() -> Option<T> {
+    with_ref(T::clone).await
 }
 
 /// Get a value from the current context. Only works when paired with
 /// [`provide_ref`](crate::ProviderFutExt::provide_ref)
-pub fn get_value<T: 'static + Clone>() -> impl Future<Output = Option<T>> {
-    GetValueFut(core::marker::PhantomData::<T>)
-}
-
-/// [`Future`] returned by [`get_value`]
-struct GetValueFut<T>(core::marker::PhantomData<T>);
-impl<T> Unpin for GetValueFut<T> {}
-
-impl<T: Clone + 'static> Future for GetValueFut<T> {
-    type Output = Option<T>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Poll::Ready(request_ref_from_context(cx).cloned())
-    }
-}
-
-/// Take a value from the current context. Only works when paired with
-/// [`provide_value`](crate::ProviderFutExt::provide_value)
-pub fn take_value<T: 'static>() -> impl Future<Output = Option<T>> {
-    TakeValueFut(core::marker::PhantomData::<T>)
-}
-
-/// [`Future`] returned by [`take_value`]
-struct TakeValueFut<T>(core::marker::PhantomData<T>);
-impl<T> Unpin for TakeValueFut<T> {}
-
-impl<T: 'static> Future for TakeValueFut<T> {
-    type Output = Option<T>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Poll::Ready(request_value_from_context(cx))
-    }
-}
-
-/// Get a value from the current context. Only works when paired with
-/// [`provide_ref`](crate::ProviderFutExt::provide_ref)
-pub fn with_ref<T: 'static + ?Sized, F: for<'c> FnOnce(&'c T) -> R, R>(
-    f: F,
-) -> impl Future<Output = Option<R>> {
-    WithRefFut(Some(f), core::marker::PhantomData::<(&'static T, R)>)
+pub async fn with_ref<T: 'static + ?Sized, F: for<'c> FnOnce(&'c T) -> R, R>(f: F) -> Option<R> {
+    WithRefFut(Some(f), core::marker::PhantomData::<(&'static T, R)>).await
 }
 
 /// [`Future`] returned by [`with_ref`]
