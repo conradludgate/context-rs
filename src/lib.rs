@@ -1,5 +1,5 @@
 #![feature(waker_getters, provide_any)]
-#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(feature = "std"), no_std)]
 #![doc = include_str!("../README.md")]
 
 mod demand;
@@ -9,6 +9,9 @@ mod waker;
 pub use demand::{get_value, with_ref};
 pub use provider::{ProvideRef, ProviderFut, ProviderFutExt};
 pub use waker::ProviderWaker;
+
+#[cfg(feature = "std")]
+pub mod well_known;
 
 #[cfg(test)]
 mod tests {

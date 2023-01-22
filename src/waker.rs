@@ -32,7 +32,8 @@ static VTABLE: RawWakerVTable = {
         // should never get ownership of ProviderWaker's Waker
         // (*waker.cast::<ProviderWaker>()).waker.wake_by_ref()
     }
-    unsafe fn drop(_: *const ()) { /* ProviderWaker needs no drop */
+    unsafe fn drop(_: *const ()) {
+        // ProviderWaker needs no drop
     }
 
     RawWakerVTable::new(clone, wake, wake_by_ref, drop)

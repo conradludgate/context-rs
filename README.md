@@ -71,9 +71,6 @@ async fn main() {
 }
 ```
 
-If you want to pass something more interesting down the stack but need ownership,
-you can use the `provide_value` + `take_value` pair of methods. This avoids the `Clone`
-bound that `get_value` requires.
-
-Lastly, if you only need to access the value temporarily, you can use the `provide_ref`+`with_ref`
-flow. This will accept a closure with the ref provided for a short lived lifetime.
+If you only need to access the value temporarily, and the value you want
+is expensive to clone, you can use `with_ref` instead of `get_value`.
+This will accept a closure with the ref provided for a short lived lifetime.
