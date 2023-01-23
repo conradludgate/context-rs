@@ -8,8 +8,8 @@ pub use shutdown::{ShutdownProvider, ShutdownReceiver, ShutdownSender};
 #[cfg(feature = "time")]
 pub use shutdown::{run_until_signal, SignalOrComplete};
 
-mod linked_list;
-mod notify;
+// mod linked_list;
+// mod notify;
 mod shutdown;
 
 /// Extension trait to provide some well known context values
@@ -18,9 +18,27 @@ pub trait WellKnownProviderExt: Future + Sized {
     ///
     /// Note, this doesn't guarantee that the future will stop executing, this is up
     /// to the implementation to respect the timeout.
-    ///
+    /// 
     /// ```
+    /// use std::time::Duration;
+    /// use context_rs::well_known::{
+    ///     WellKnownProviderExt, ShutdownSender, run_until_signal, SignalOrComplete
+    /// };
     ///
+    /// async fn do_something() {
+    ///     loop {
+    ///         // pretend this is more interesting
+    ///         let work = tokio::time::sleep(Duration::from_secs(1));
+    ///         match run_until_signal(std::pin::pin!(work)).await {
+    ///             SignalOrComplete::Completed(_) => continue,
+    ///             SignalOrComplete::ShutdownSignal(_) => break,
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// # #[tokio::main] async fn main() {
+    /// do_something().with_timeout(Duration::from_secs(5)).await;
+    /// # }
     /// ```
     fn with_timeout(self, duration: Duration) -> ProviderFut<Self, Deadline> {
         self.with_deadline(Instant::now() + duration)
@@ -84,28 +102,9 @@ impl Provider for Deadline {
     }
 }
 
-#[derive(Debug, PartialEq)]
-pub struct Expired;
-
-impl std::error::Error for Expired {}
-impl core::fmt::Display for Expired {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("context has reached it's deadline")
-    }
-}
-
 impl Deadline {
     // Returns the deadline of the current context, if there is one
     pub async fn get() -> Option<Instant> {
         with_ref(|Deadline(deadline)| *deadline).await
-    }
-
-    // check if the deadline stored in the context has expired
-    // returns OK if no deadline is stored.
-    pub async fn expired() -> Result<(), Expired> {
-        let not_expired = with_ref(|Deadline(deadline)| deadline > &Instant::now())
-            .await
-            .unwrap_or(true);
-        not_expired.then_some(()).ok_or(Expired)
     }
 }

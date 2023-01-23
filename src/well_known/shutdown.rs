@@ -4,10 +4,11 @@ use core::task::{Context, Poll};
 use core::{any::Provider, sync::atomic::AtomicBool};
 use pin_project_lite::pin_project;
 use std::sync::Arc;
+use tokio::sync::futures::Notified;
 
 use crate::get_value;
 
-use super::notify::{Notified, Notify};
+use tokio::sync::Notify;
 
 #[derive(Debug, Default)]
 struct ShutdownInner {
@@ -110,8 +111,8 @@ impl<F: Future> SignalOrComplete<F> {
     }
 }
 
+#[cfg(feature = "time")]
 pin_project!(
-    #[cfg(feature = "time")]
     struct SignalOrCompleteFut<F, A, B> {
         inner: Option<F>,
         #[pin]
