@@ -1,15 +1,17 @@
+//! Well known uses for provider contexts.
+//!
+//! This mirrors what you might find with Go's [`context.Context`](https://pkg.go.dev/context).
+
 use core::{any::Provider, future::Future};
 use std::time::{Duration, Instant};
 
 use crate::{with_ref, ProviderFut, ProviderFutExt};
 
-pub use shutdown::{ShutdownProvider, ShutdownReceiver, ShutdownSender};
+pub use shutdown::{ShutdownReceiver, ShutdownSender};
 
 #[cfg(feature = "time")]
 pub use shutdown::time::{run_until_signal, SignalOrComplete};
 
-// mod linked_list;
-// mod notify;
 mod shutdown;
 
 /// Extension trait to provide some well known context values
@@ -87,12 +89,13 @@ pub trait WellKnownProviderExt: Future + Sized {
     fn with_shutdown_handler(
         self,
         handler: ShutdownReceiver,
-    ) -> ProviderFut<Self, ShutdownProvider> {
-        self.provide(ShutdownProvider::from(handler))
+    ) -> ProviderFut<Self, ShutdownReceiver> {
+        self.provide(handler)
     }
 }
 impl<F: Future> WellKnownProviderExt for F {}
 
+/// A Deadline type that wraps an `Instant`.
 #[derive(Debug, Clone, Copy)]
 pub struct Deadline(pub Instant);
 
@@ -103,7 +106,7 @@ impl Provider for Deadline {
 }
 
 impl Deadline {
-    // Returns the deadline of the current context, if there is one
+    /// Returns the deadline of the current context, if there is one
     pub async fn get() -> Option<Instant> {
         with_ref(|Deadline(deadline)| *deadline).await
     }

@@ -14,15 +14,7 @@ struct ShutdownInner {
     shutdown: AtomicBool,
 }
 
-pub struct ShutdownProvider(Option<Arc<ShutdownInner>>);
-
-impl From<ShutdownReceiver> for ShutdownProvider {
-    fn from(value: ShutdownReceiver) -> Self {
-        Self(value.0)
-    }
-}
-
-impl Provider for ShutdownProvider {
+impl Provider for ShutdownReceiver {
     fn provide<'a>(&'a self, demand: &mut core::any::Demand<'a>) {
         if let Some(inner) = self.0.as_ref() {
             demand.provide_ref(inner);
@@ -31,16 +23,20 @@ impl Provider for ShutdownProvider {
 }
 
 #[derive(Clone, Default)]
+/// The sending side of a shutdown handler
 pub struct ShutdownSender(Arc<ShutdownInner>);
 
 #[derive(Clone)]
+/// The receiving side of a shutdown handler
 pub struct ShutdownReceiver(Option<Arc<ShutdownInner>>);
 
 impl ShutdownSender {
+    /// Create a new `ShutdownSender` in it's non-shutdown state
     pub fn new() -> Self {
         Default::default()
     }
 
+    /// Turns this `ShutdownSender` into a [`ShutdownReceiver`]
     pub fn receiver(self) -> ShutdownReceiver {
         ShutdownReceiver(Some(self.0))
     }
@@ -55,6 +51,7 @@ impl ShutdownSender {
 }
 
 impl ShutdownReceiver {
+    /// Get the currently registered shutdown handler from the context
     pub async fn from_context() -> Self {
         Self(get_value().await)
     }
@@ -93,7 +90,7 @@ impl Future for ShutdownSignal<'_> {
 }
 
 #[cfg(feature = "time")]
-#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+#[cfg_attr(docsrs, doc(cfg(feature = "time")))]
 pub(crate) mod time {
     use super::{ShutdownReceiver, ShutdownSignal};
     use core::future::Future;
@@ -102,8 +99,12 @@ pub(crate) mod time {
     use pin_project_lite::pin_project;
 
     #[derive(Debug)]
+    /// Enum state returned by [`run_until_signal`].
     pub enum SignalOrComplete<F: Future> {
+        /// Indicates there was a signal raised during the duration of the future.
+        /// It can be resumed if necessary using the given value.
         ShutdownSignal(F),
+        /// The future completed without any signal interuptions.
         Completed(F::Output),
     }
 
