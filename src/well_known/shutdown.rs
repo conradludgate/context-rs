@@ -1,3 +1,4 @@
+use crate::get_value;
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
@@ -5,9 +6,6 @@ use core::{any::Provider, sync::atomic::AtomicBool};
 use pin_project_lite::pin_project;
 use std::sync::Arc;
 use tokio::sync::futures::Notified;
-
-use crate::get_value;
-
 use tokio::sync::Notify;
 
 #[derive(Debug, Default)]
@@ -94,123 +92,128 @@ impl Future for ShutdownSignal<'_> {
     }
 }
 
-#[derive(Debug)]
 #[cfg(feature = "time")]
-pub enum SignalOrComplete<F: Future> {
-    ShutdownSignal(F),
-    Completed(F::Output),
-}
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+pub(crate) mod time {
+    use super::{ShutdownReceiver, ShutdownSignal};
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::task::{Context, Poll};
+    use pin_project_lite::pin_project;
 
-#[cfg(feature = "time")]
-impl<F: Future> SignalOrComplete<F> {
-    pub fn completed(self) -> Option<F::Output> {
-        match self {
-            SignalOrComplete::ShutdownSignal(_) => None,
-            SignalOrComplete::Completed(f) => Some(f),
-        }
+    #[derive(Debug)]
+    pub enum SignalOrComplete<F: Future> {
+        ShutdownSignal(F),
+        Completed(F::Output),
     }
-}
 
-#[cfg(feature = "time")]
-pin_project!(
-    struct SignalOrCompleteFut<F, A, B> {
-        inner: Option<F>,
-        #[pin]
-        a: Option<A>,
-        #[pin]
-        b: Option<B>,
-    }
-);
-
-#[cfg(feature = "time")]
-impl<F, A, B> Future for SignalOrCompleteFut<F, A, B>
-where
-    F: Future + Unpin,
-    A: Future<Output = ()>,
-    B: Future<Output = ()>,
-{
-    type Output = SignalOrComplete<F>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-        let mut f = this.inner.take().expect("cannot poll Select twice");
-
-        if let Poll::Ready(f) = Pin::new(&mut f).poll(cx) {
-            return Poll::Ready(SignalOrComplete::Completed(f));
-        }
-        if let Some(a) = this.a.as_pin_mut() {
-            if a.poll(cx).is_ready() {
-                return Poll::Ready(SignalOrComplete::ShutdownSignal(f));
+    impl<F: Future> SignalOrComplete<F> {
+        pub fn completed(self) -> Option<F::Output> {
+            match self {
+                SignalOrComplete::ShutdownSignal(_) => None,
+                SignalOrComplete::Completed(f) => Some(f),
             }
         }
-        if let Some(b) = this.b.as_pin_mut() {
-            if b.poll(cx).is_ready() {
-                return Poll::Ready(SignalOrComplete::ShutdownSignal(f));
-            }
+    }
+
+    pin_project!(
+        struct SignalOrCompleteFut<F, A, B> {
+            inner: Option<F>,
+            #[pin]
+            a: Option<A>,
+            #[pin]
+            b: Option<B>,
         }
+    );
 
-        *this.inner = Some(f);
-        Poll::Pending
+    impl<F, A, B> Future for SignalOrCompleteFut<F, A, B>
+    where
+        F: Future + Unpin,
+        A: Future<Output = ()>,
+        B: Future<Output = ()>,
+    {
+        type Output = SignalOrComplete<F>;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let this = self.project();
+            let mut f = this.inner.take().expect("cannot poll Select twice");
+
+            if let Poll::Ready(f) = Pin::new(&mut f).poll(cx) {
+                return Poll::Ready(SignalOrComplete::Completed(f));
+            }
+            if let Some(a) = this.a.as_pin_mut() {
+                if a.poll(cx).is_ready() {
+                    return Poll::Ready(SignalOrComplete::ShutdownSignal(f));
+                }
+            }
+            if let Some(b) = this.b.as_pin_mut() {
+                if b.poll(cx).is_ready() {
+                    return Poll::Ready(SignalOrComplete::ShutdownSignal(f));
+                }
+            }
+
+            *this.inner = Some(f);
+            Poll::Pending
+        }
     }
-}
 
-#[cfg(feature = "time")]
-/// Runs the provided future until either [`shutdown`](ShutdownSender::shutdown)
-/// is called on the [registered shutdown handler](super::WellKnownProviderExt::with_shutdown_handler),
-/// or until the [`deadline`](super::WellKnownProviderExt::with_deadline) expires.
-/// The unfinished future is returned in case it is not cancel safe and you need to complete it
-///
-/// ```
-/// use std::time::Duration;
-/// use context_rs::well_known::{
-///     WellKnownProviderExt, ShutdownSender, SignalOrComplete, run_until_signal
-/// };
-///
-/// # #[tokio::main] async fn main() {
-/// async fn important_work() -> Option<i32> {
-///     let mut sum = 0;
-///     for i in 0..6 {
-///         // internally, we respect any shutdown signals
-///         // and the deadline by using `run_until_stopped`
-///         sum += run_until_signal(std::pin::pin!(expensive_work())).await.completed()?;
-///     }
-///     Some(sum)
-/// }
-///
-/// async fn expensive_work() -> i32 {
-///     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-///     7
-/// }
-///
-/// let shutdown = ShutdownSender::new();
-///
-/// // spawn off some important work
-/// let work = important_work()
-///     .with_shutdown_handler(shutdown.clone().receiver())
-///     .with_timeout(Duration::from_secs(5));
-///
-/// // should return None if it takes longer than 5 seconds,
-/// // or if `shutdown.shutdown()` is called
-/// let res = work.await;
-/// # assert_eq!(res, None);
-/// # }
-/// ```
-pub async fn run_until_signal<F: Future + Unpin>(f: F) -> SignalOrComplete<F> {
-    use crate::well_known::Deadline;
+    /// Runs the provided future until either [`shutdown`](super::ShutdownSender::shutdown)
+    /// is called on the [registered shutdown handler](crate::well_known::WellKnownProviderExt::with_shutdown_handler),
+    /// or until the [`deadline`](crate::well_known::WellKnownProviderExt::with_deadline) expires.
+    /// The unfinished future is returned in case it is not cancel safe and you need to complete it
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use context_rs::well_known::{
+    ///     WellKnownProviderExt, ShutdownSender, SignalOrComplete, run_until_signal
+    /// };
+    ///
+    /// # #[tokio::main] async fn main() {
+    /// async fn important_work() -> Option<i32> {
+    ///     let mut sum = 0;
+    ///     for i in 0..6 {
+    ///         // internally, we respect any shutdown signals
+    ///         // and the deadline by using `run_until_stopped`
+    ///         sum += run_until_signal(std::pin::pin!(expensive_work())).await.completed()?;
+    ///     }
+    ///     Some(sum)
+    /// }
+    ///
+    /// async fn expensive_work() -> i32 {
+    ///     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    ///     7
+    /// }
+    ///
+    /// let shutdown = ShutdownSender::new();
+    ///
+    /// // spawn off some important work
+    /// let work = important_work()
+    ///     .with_shutdown_handler(shutdown.clone().receiver())
+    ///     .with_timeout(Duration::from_secs(5));
+    ///
+    /// // should return None if it takes longer than 5 seconds,
+    /// // or if `shutdown.shutdown()` is called
+    /// let res = work.await;
+    /// # assert_eq!(res, None);
+    /// # }
+    /// ```
+    pub async fn run_until_signal<F: Future + Unpin>(f: F) -> SignalOrComplete<F> {
+        use crate::well_known::Deadline;
 
-    let deadline = Deadline::get().await;
-    let shutdown = ShutdownReceiver::from_context().await.0;
-    let res = SignalOrCompleteFut {
-        inner: Some(f),
-        a: deadline.map(|deadline| tokio::time::sleep_until(deadline.into())),
-        b: shutdown.as_deref().map(|shutdown| ShutdownSignal {
-            shutdown: &shutdown.shutdown,
-            notified: shutdown.notifier.notified(),
-        }),
+        let deadline = Deadline::get().await;
+        let shutdown = ShutdownReceiver::from_context().await.0;
+        let res = SignalOrCompleteFut {
+            inner: Some(f),
+            a: deadline.map(|deadline| tokio::time::sleep_until(deadline.into())),
+            b: shutdown.as_deref().map(|shutdown| ShutdownSignal {
+                shutdown: &shutdown.shutdown,
+                notified: shutdown.notifier.notified(),
+            }),
+        }
+        .await;
+
+        // temporaries are a pain sometimes...
+        #[allow(clippy::let_and_return)]
+        res
     }
-    .await;
-
-    // temporaries are a pain sometimes...
-    #[allow(clippy::let_and_return)]
-    res
 }

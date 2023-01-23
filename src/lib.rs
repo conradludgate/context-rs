@@ -12,6 +12,7 @@ pub use provider::{ProvideRef, ProviderFut, ProviderFutExt};
 pub use waker::ProviderWaker;
 
 #[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub mod well_known;
 
 #[cfg(test)]

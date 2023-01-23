@@ -6,7 +6,7 @@ use crate::{with_ref, ProviderFut, ProviderFutExt};
 pub use shutdown::{ShutdownProvider, ShutdownReceiver, ShutdownSender};
 
 #[cfg(feature = "time")]
-pub use shutdown::{run_until_signal, SignalOrComplete};
+pub use shutdown::time::{run_until_signal, SignalOrComplete};
 
 // mod linked_list;
 // mod notify;
@@ -18,7 +18,7 @@ pub trait WellKnownProviderExt: Future + Sized {
     ///
     /// Note, this doesn't guarantee that the future will stop executing, this is up
     /// to the implementation to respect the timeout.
-    /// 
+    ///
     /// ```
     /// use std::time::Duration;
     /// use context_rs::well_known::{
